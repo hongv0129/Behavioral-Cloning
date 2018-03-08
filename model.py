@@ -40,21 +40,26 @@ print('===========================')
 """
 
 #==============================================================================
-USE_BATCH_GENERATOR = 0
+USE_BATCH_GENERATOR = 1
 ANGLE_CORRECTION = 0.24
 BATCH_SIZE = 128
-EPOCH_COUNT = 15
+GENERATOR_BATCH_SIZE = 22 # 132 Samples per Batch == 22 * 6
+EPOCH_COUNT = 8
 DROPOUT_RATE = 0.50
 LEARNING_RATE = 0.00081
 DECAY_RATE = 0.0
 VALIDATE_SET_SPLIT_RATIO = 0.15
 
 print("Generator Used?  :", USE_BATCH_GENERATOR)
-print("Epoch Count      :", EPOCH_COUNT)
+print("Max Epoch Count  :", EPOCH_COUNT)
 print("Batch Size       :", BATCH_SIZE)
+print("Generator Size   :", GENERATOR_BATCH_SIZE)
 print("Learning Rate    :", LEARNING_RATE)
 print("Decay Rate       :", DECAY_RATE)
 
+
+#==============================================================================
+# Load Entire Dataset in One Shot (Option 1)
 #==============================================================================
 def FetchRecordList():
     Lines = []
@@ -100,8 +105,61 @@ def LoadEntireDataset(Lines):
     print(X_Train.shape)
     
     return X_Train, y_Train
+    
 #==============================================================================
+# Load Dataset with Batch Generator (Option 2)
+#==============================================================================
+from sklearn.model_selection import train_test_split
 
+def FetchSplitRecordList():
+    SampleRecords = []
+    with open('./simulation_data/driving_log.csv') as csvFile:
+        Reader = csv.reader(csvFile)
+        for SampleRecord in Reader:
+            SampleRecords.append(SampleRecord)
+            
+    TrainSamples, ValidateSamples = \
+            train_test_split(SampleRecords, test_size=VALIDATE_SET_SPLIT_RATIO)
+
+    print("Number of Training Samples: ", len(TrainSamples) * 6)
+    print("Number of Validation Samples: ", len(ValidateSamples) * 6)
+    
+    return TrainSamples, ValidateSamples
+    
+def BatchGenerator(Samples, BatchSize=GENERATOR_BATCH_SIZE):
+    while 1: # Loop forever so that the generator never terminates
+        sklearn_shuffle(Samples)
+        for Offset in range(0, len(Samples), BatchSize):
+            BatchSamples = Samples[Offset : Offset+BatchSize]
+            Images = []
+            SteerAngles = []
+            for BatchSample in BatchSamples:
+                for CameraIndex in range(0, 3, 1):
+                    SourcePath = BatchSample[CameraIndex]
+                    FileName = SourcePath.split("\\")[-1]
+                    RelativePath = './simulation_data/IMG/' + FileName
+                    
+                    OrgImage = cv2.imread(RelativePath)
+                    Image = cv2.cvtColor(OrgImage, cv2.COLOR_BGR2RGB)
+                    Images.append(Image)
+                    
+                    SteerAngle = float(BatchSample[3])
+                    if(CameraIndex == 1): #Left Camera
+                        SteerAngle = SteerAngle + ANGLE_CORRECTION
+                    elif(CameraIndex == 2): #Right Camera
+                        SteerAngle = SteerAngle - ANGLE_CORRECTION
+                    SteerAngles.append(SteerAngle)
+                    
+                    MirrorImage = cv2.flip(Image, 1)
+                    MirrorSteerAngle = -SteerAngle
+                    
+                    Images.append(MirrorImage)   
+                    SteerAngles.append(MirrorSteerAngle)
+            SampleFeature_X = np.array(Images)
+            SampleLabel_y = np.array(SteerAngles)
+            #print(SampleFeature_X.shape)
+            #print(SampleLabel_y.shape)
+            yield sklearn_shuffle(SampleFeature_X, SampleLabel_y)
 
 #==============================================================================
 # Model Regression Neural Network
@@ -190,7 +248,21 @@ if(USE_BATCH_GENERATOR == 0):
                                 batch_size = BATCH_SIZE, nb_epoch=EPOCH_COUNT,
                                 validation_split=VALIDATE_SET_SPLIT_RATIO, shuffle=True, 
                                 callbacks=[EarlyStopper] )
-
+                                
+elif (USE_BATCH_GENERATOR == 1):
+    # compile and train the model using the generator function
+    TrainSamples, ValidateSamples = FetchSplitRecordList()
+    
+    GeneratorYieldCount = (len(TrainSamples)/GENERATOR_BATCH_SIZE)+1
+    ValidationYieldCount = (len(ValidateSamples)/GENERATOR_BATCH_SIZE)+1
+    
+    DataGenTrain = BatchGenerator(TrainSamples, BatchSize=GENERATOR_BATCH_SIZE)
+    DataGenValidate = BatchGenerator(ValidateSamples, BatchSize=GENERATOR_BATCH_SIZE)
+    
+    HistoryObject = Model.fit_generator(DataGenTrain, steps_per_epoch=GeneratorYieldCount,
+                                        validation_data=DataGenValidate, validation_steps=ValidationYieldCount, 
+                                        epochs=EPOCH_COUNT, verbose = 1, shuffle=True,
+                                        callbacks=[EarlyStopper] )
 Model.save('model.h5')
 del Model  # deletes the existing model
 
